@@ -1,0 +1,24 @@
+{
+  "distribution_distance": {
+    "mean_shift_to_moderate_psi": 0.3,
+    "mean_shift_to_significant_psi": 0.5
+  },
+  "concept_drift": {
+    "detection_rate": 1.0,
+    "median_detection_delay_samples": 26.0,
+    "mean_detection_delay_samples": 26.03,
+    "clean_stream_false_alarm_rate": 0.0
+  },
+  "config": {
+    "generated_utc": "2026-07-04T15:37:28+00:00",
+    "seed": 42,
+    "python": "3.14.5",
+    "numpy": "2.5.0",
+    "pandas": "3.0.3",
+    "scipy": "1.18.0",
+    "matplotlib": "3.11.0",
+    "ph_delta": 0.01,
+    "ph_threshold": 5.0,
+    "n_seeds": 30
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "params": {
+    "n": 4000,
+    "change_point": 2000,
+    "n_seeds": 30,
+    "delta": 0.01,
+    "threshold": 5.0,
+    "min_instances": 30,
+    "base_error": 0.1,
+    "shifted_error": 0.3,
+    "noise_std": 0.02
+  },
+  "detection_rate": 1.0,
+  "pre_change_false_alarm_runs": 0,
+  "detection_delay_samples": {
+    "mean": 26.03,
+    "median": 26.0,
+    "std": 0.48,
+    "min": 25,
+    "max": 27
+  },
+  "clean_stream_false_alarm_rate": 0.0,
+  "clean_stream_false_alarms_total": 0
+}
