@@ -1,172 +1,89 @@
-# mlops-drift-detector — statistical drift monitoring for production ML
+# mlops-drift-detector
 
-![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+Statistical drift monitoring for production ML — detect **data drift** and **concept drift** with well-understood statistics, and export them to Prometheus so silent model decay becomes an alertable signal instead of a surprise.
+
+[![ci](https://github.com/ejazfahil/mlops-drift-detector/actions/workflows/ci.yml/badge.svg)](https://github.com/ejazfahil/mlops-drift-detector/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11%E2%80%933.14-3776AB?logo=python&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
 ![NumPy](https://img.shields.io/badge/NumPy-013243?logo=numpy&logoColor=white)
-![pandas](https://img.shields.io/badge/pandas-150458?logo=pandas&logoColor=white)
+![SciPy](https://img.shields.io/badge/SciPy-8CAAE6?logo=scipy&logoColor=white)
 ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?logo=prometheus&logoColor=white)
-![Status](https://img.shields.io/badge/status-core%20implemented-success)
 
-A lightweight, dependency-minimal toolkit for detecting **data drift** and
-**concept drift** in deployed models, and exporting the signals to Prometheus so
-they become first-class observability metrics with alerting.
+## Headline result
 
----
+From `python benchmarks/run_benchmark.py` (seed 42, CPU only — no GPU or API keys). Raw artifacts in [`results/`](results/).
 
-## Overview & Aim
+- **Concept drift:** Page-Hinkley detects an abrupt error-rate increase (0.10 → 0.30) in a **median of 26 samples** across 30 seeds — **100% detection rate**, **0 false alarms** on matched stationary streams.
+- **Feature drift:** PSI crosses its conventional *moderate* band (0.10) at a **0.3σ** covariate mean shift and *significant* (0.25) at **0.5σ**; Wasserstein distance tracks the shift ≈1:1, an independent correctness check.
 
-Models decay silently. The input distribution shifts, the relationship between
-features and target drifts, and aggregate accuracy — if it is even measurable in
-production — moves too slowly to act on. This project treats drift as a
-**monitoring problem**: compute principled, well-understood statistics on
-incoming data and surface them as Prometheus gauges that an SRE/ML team can alert
-and dashboard on, exactly like any other production signal.
+## Approach
 
-The design separates three concerns:
+Three concerns, one exporter:
 
-| Concern | Question answered | Implementation |
+| Concern | Question | Method |
 |---|---|---|
-| **Feature drift** | Has the *input* distribution moved? | Population Stability Index (PSI) per numeric feature |
-| **Concept drift** | Has the *error stream* changed regime? | Page–Hinkley sequential change-point test |
-| **Streaming** | Detect drift online, one sample at a time | Bounded-window monitor with reset + callback |
-| **Export** | Make it observable | Prometheus text-exposition exporter |
+| Feature drift | Did the input distribution move? | PSI (+ KL, JS, Wasserstein) per numeric feature |
+| Concept drift | Did the error stream change regime? | Page-Hinkley sequential change-point test |
+| Streaming | Detect online in O(1) memory | Bounded-window monitor, auto-reset + callback |
+| Export | Make it observable | Prometheus text-exposition gauges → Grafana / alerts |
 
----
-
-## Methodology / How It Works
-
-### 1. Feature drift — Population Stability Index (PSI)
-
-For a reference (training) distribution and a current (production) window, each
-numeric feature is binned into `n_bins` (default 10) fixed-edge buckets derived
-from the reference range. With reference proportions $e_i$ and current
-proportions $a_i$ in bin $i$, PSI is the **symmetric population-stability sum**:
-
-$$\mathrm{PSI} = \sum_{i=1}^{B} (a_i - e_i)\,\ln\!\frac{a_i}{e_i}$$
-
-Bin proportions are floored at $\epsilon = 10^{-6}$ to keep the log finite, and a
-degenerate (zero-variance) feature returns 0. The conventional banding is applied
-verbatim in [`src/metrics/psi.py`](src/metrics/psi.py):
-
-| PSI | Interpretation |
-|---|---|
-| `< 0.10` | `stable` |
-| `0.10 – 0.25` | `moderate_shift` |
-| `> 0.25` | `significant_shift` |
-
-[`FeatureDriftDetector`](src/detectors/feature_drift.py) caches the reference
-arrays per numeric column at construction, then on each `detect(current)` call
-returns a per-feature `{psi, status}` map, the list of drifted columns (those
-above the threshold, default `0.25`), and an `overall` boolean.
-
-### 2. Concept drift — Page–Hinkley test
-
-[`PageHinkleyDetector`](src/detectors/concept_drift.py) is a classic sequential
-change-point detector run over a stream of error/loss values. It maintains a
-running mean $\bar{x}_t$ (EW-updated by `alpha`), accumulates the magnitude-and-
-direction sum
-
-$$m_t = \sum_{k\le t}\bigl(x_k - \bar{x}_k - \delta\bigr),\qquad
-M_t = \min_{k\le t} m_k,$$
-
-and flags drift when the deviation $m_t - M_t$ exceeds a threshold $\lambda$
-(default `50.0`), with `delta` a tolerance slack. This catches a sustained upward
-shift in the error stream without storing the full history.
-
-### 3. Streaming monitor
-
-[`StreamingDriftMonitor`](src/detectors/streaming_detector.py) wraps the
-Page–Hinkley detector with a bounded `deque` window, a drift counter, and an
-`on_drift` callback. On a positive detection it fires the callback (carrying the
-step index and cumulative drift count) and **auto-resets** the detector so it can
-catch the next regime change.
-
-```
-errors ──▶ StreamingDriftMonitor.update(err)
-              │  append to window (maxlen=window)
-              ▼
-        PageHinkleyDetector.update(err) ──▶ drift?
-              │ yes                              │ no
-              ▼                                  ▼
-        on_drift({t, n}); ph.reset()        return False
+```mermaid
+flowchart LR
+  Ref[reference window] --> M[PSI / KL / JS / Wasserstein]
+  Cur[current window] --> M --> Rep[drift report]
+  Err[error / loss stream] --> PH[Page-Hinkley] --> Mon[streaming monitor]
+  Rep --> Exp[Prometheus exporter]
+  Mon --> Exp --> Graf[Grafana / alerts]
 ```
 
-### 4. Prometheus export
+## Reproduce it
 
-[`PrometheusExporter`](src/exporters/prometheus.py) renders a results dict into
-the Prometheus text-exposition format:
+Environment: Python 3.11–3.14 (results captured on **3.14.5**, macOS/Linux, CPU only). Full run ≈ 10 s.
 
-```
-# TYPE ml_drift_feature_psi gauge
-ml_drift_feature_psi{feature="amount"} 0.31
-ml_drift_overall_rate 0.14
-```
+```bash
+git clone https://github.com/ejazfahil/mlops-drift-detector
+cd mlops-drift-detector
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-These scrape cleanly into Prometheus and drive alert rules
-(see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)).
-
----
-
-## Tech Stack & Tools
-
-- **Python 3.11+**
-- **NumPy** — histogramming, PSI computation
-- **pandas** — feature-frame handling and dtype selection
-- **Prometheus** — metric export (text exposition format) + alerting
-- **Docker** — containerized monitor (see deployment guide)
-- Standard library only for the streaming path (`collections.deque`, `dataclasses`)
-
----
-
-## Project Structure
-
-```
-mlops-drift-detector/
-├── src/
-│   ├── metrics/
-│   │   └── psi.py                  # compute_psi() + interpret_psi() banding
-│   ├── detectors/
-│   │   ├── feature_drift.py        # FeatureDriftDetector (PSI per numeric feature)
-│   │   ├── concept_drift.py        # PageHinkleyDetector (sequential change point)
-│   │   └── streaming_detector.py   # StreamingDriftMonitor (online + callback)
-│   └── exporters/
-│       └── prometheus.py           # PrometheusExporter (text exposition format)
-├── tests/
-│   └── test_detectors.py           # no-drift vs drift assertions (seeded Normals)
-└── docs/
-    └── DEPLOYMENT.md               # Dockerfile + Prometheus alert rule
+make bench     # regenerate every table + plot in results/
+make test      # 12 tests
 ```
 
----
-
-## Key Features
-
-- **PSI feature drift** with the standard stable/moderate/significant banding.
-- **Page–Hinkley concept drift** for online error-stream change detection.
-- **Streaming monitor** with bounded memory, auto-reset, and a drift callback.
-- **Prometheus-native export** — drift becomes a gauge you can alert on.
-- **Minimal dependencies** — NumPy/pandas for the batch path; stdlib for streaming.
-- **Tested behavior** — `tests/test_detectors.py` verifies that two samples from
-  the same Normal do **not** drift, while a mean shift of +10σ **does**.
-
----
+The benchmark is fully seeded and `results/config.json` records the seed and exact library versions, so a fresh run reproduces the committed numbers. **No external dataset** — every scenario is synthetic and defined in code, so nothing needs downloading or redistribution rights.
 
 ## Results
 
-This repository ships the **detector library and a behavioral test suite**, not a
-benchmark report. The included test (`tests/test_detectors.py`) demonstrates
-correct directionality on seeded synthetic data — no-drift inputs return
-`overall=False`, a large mean shift returns `overall=True`. No production drift
-scores are claimed here; PSI/Page–Hinkley values are data-dependent and computed
-at runtime.
+### Concept drift — Page-Hinkley (30 seeds)
 
----
+| Metric | Value |
+|---|---|
+| Detection rate | **100%** (30/30) |
+| Median detection delay | **26 samples** |
+| Mean ± std delay | 26.03 ± 0.48 (range 25–27) |
+| False-alarm rate (stationary stream) | **0.0** |
 
-## Getting Started
+An error stream of 4000 samples steps from `N(0.10, 0.02)` to `N(0.30, 0.02)` at t=2000. Page-Hinkley (δ=0.01, λ=5, warm-up 30) runs online; detection delay = first alarm index − 2000, averaged over 30 seeds. A matched stationary stream (no change point) measures false alarms. Full data: [`results/concept_drift_detection.json`](results/concept_drift_detection.json).
 
-```bash
-# Run the behavioral tests
-python -m pytest tests/ -q
-```
+![Page-Hinkley detection](results/page_hinkley_run.png)
+![Detection delay distribution](results/detection_delay_hist.png)
+
+### Feature drift — distribution-distance sensitivity (N=5000)
+
+| Mean shift (σ) | PSI | KL | Wasserstein | Status |
+|---:|---:|---:|---:|---|
+| 0.0 | 0.004 | 0.002 | 0.029 | stable |
+| 0.2 | 0.076 | 0.038 | 0.270 | stable |
+| 0.3 | 0.119 | 0.057 | 0.341 | moderate_shift |
+| 0.5 | 0.271 | 0.140 | 0.524 | significant_shift |
+| 1.0 | 0.996 | 0.498 | 1.021 | significant_shift |
+| 2.0 | 4.143 | 1.969 | 2.026 | significant_shift |
+
+Reference `N(0,1)`, current `N(shift, 1)`. PSI/KL/JS on 10 bins; Wasserstein on raw samples. Variance-shift rows and the full grid are in [`results/feature_drift_sensitivity.csv`](results/feature_drift_sensitivity.csv).
+
+![Drift metrics vs shift](results/psi_vs_shift.png)
+
+## Use it
 
 ```python
 import pandas as pd
@@ -174,44 +91,36 @@ from src.detectors.feature_drift import FeatureDriftDetector
 from src.detectors.streaming_detector import StreamingDriftMonitor
 from src.exporters.prometheus import PrometheusExporter
 
-# Batch feature drift
-ref = pd.DataFrame({"amount": [...]})
-det = FeatureDriftDetector(ref, threshold=0.25)
-report = det.detect(current_df)           # {"features": {...}, "drifted": [...], "overall": bool}
+# batch feature drift → Prometheus metrics
+det = FeatureDriftDetector(reference_df, threshold=0.25)
+report = det.detect(current_df)     # {"features": {...}, "drifted": [...], "overall": bool}
 print(PrometheusExporter().export(report))
 
-# Online concept drift on an error stream
-mon = StreamingDriftMonitor(window=1000, on_drift=lambda e: print("DRIFT", e))
+# online concept drift on an error stream
+mon = StreamingDriftMonitor(ph_threshold=5.0, delta=0.01,
+                            on_drift=lambda e: print("DRIFT", e))
 for err in error_stream:
     mon.update(err)
 ```
 
-Deployment (Docker image + a `HighDrift` Prometheus alert firing on
-`ml_drift_feature_psi > 0.25` for 5m) is documented in
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+## Tech stack
+
+Python · NumPy · pandas · SciPy (Wasserstein) · matplotlib (plots) · pytest · Prometheus text exposition · Docker · GitHub Actions CI. The streaming path uses the standard library only (`collections.deque`, `dataclasses`).
+
+## Limitations
+
+- Synthetic Gaussian scenarios validate the **algorithms**, not any specific deployed model. Real feature streams are messier (mixed types, seasonality, missingness).
+- PSI and KL are binning-sensitive; metrics here are per-feature and 1-D — no multivariate interaction is modelled.
+- Page-Hinkley detects sustained **increases** in a scalar signal; δ (slack) and λ (threshold) are scaled to the signal magnitude and must be re-tuned per stream.
+- The 26-sample delay is specific to this shift size and noise level: larger shifts detect faster, smaller ones slower. It is not a universal constant.
+
+## Next steps
+
+- Categorical-feature drift (chi-square / JS on category frequencies).
+- Multivariate drift (classifier two-sample test / MMD) for feature interactions.
+- Wire the exporter into the streaming monitor behind a live `/metrics` endpoint with a Grafana dashboard JSON (deployment sketch in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)).
+- Drift attribution: rank features by their contribution to the overall signal.
 
 ---
 
-## Challenges
-
-- **Numerical stability of PSI** — empty/clipped bins and zero-variance features
-  must be handled before taking logs; both are guarded with an $\epsilon$ floor.
-- **Memory-bounded streaming** — Page–Hinkley keeps drift detection $O(1)$ per
-  sample, avoiding unbounded history storage.
-- **Avoiding alert storms** — auto-reset after a detection prevents a single
-  sustained shift from firing on every subsequent sample.
-
-## Future Work
-
-- Categorical-feature drift (chi-square / Jensen–Shannon) alongside numeric PSI.
-- Additional distances (KL, Wasserstein) selectable per feature.
-- A scheduled `python -m src.monitor` entrypoint (referenced in the Dockerfile)
-  wiring batch detection to a Prometheus `/metrics` endpoint.
-- Drift-attribution (which features dominate the overall signal).
-
-## Conclusion
-
-`mlops-drift-detector` packages the statistics that matter for catching silent
-model decay — PSI for input drift, Page–Hinkley for concept drift — behind a
-small, well-tested API, and exposes them in the one place an operations team will
-actually see them: Prometheus.
+MIT licensed. Built by Fahil Ejaz.

@@ -1,0 +1,7 @@
+# Pinned to the versions the committed results were produced with.
+# Captured on Python 3.14.5 (min supported: 3.11).
+numpy==2.5.0
+pandas==3.0.3
+scipy==1.18.0
+matplotlib==3.11.0
+pytest==9.1.1
